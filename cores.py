@@ -9,6 +9,7 @@ def climp(value, min, max):
     else:
         return value
 
+
 # Iniciar o Pygame
 pygame.init()
 
@@ -27,8 +28,8 @@ while True:
     for i in range(255):
         for j in range(255):
             h, l, s = colorsys.rgb_to_hls(camada, i+0.001, j+0.001)
-            #ROSA: if h>0.79 and h < 0.94 and s < -0.2 and l> 15:
-            if h>0.76 and h < 0.94 and s < -0.2 and l> 15:
+            # if  0.94 > h > 0.79 and s < -0.2 and l> 15:
+            if  0.94 > h > 0.75 and s < -0.2 and l> 15:
                 pygame.draw.rect(janela, (camada, i, j), (i * 3, j * 3, 3, 3)) # quanto mais pra direita, mais verde, mais pra baixo, mais azul
             else:
                 pygame.draw.rect(janela, (0,0,0), (i * 3, j * 3, 3, 3))
