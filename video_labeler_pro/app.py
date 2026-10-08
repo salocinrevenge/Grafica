@@ -31,9 +31,12 @@ class VideoLabelerApp:
 
         self.current_frame = 0
         self.playing = False
-        self.zoom_level = 1.0  # Nível de Zoom inicial (1.0x)
+        self.zoom_level = 1.0
         self.pending_mode_change = None
         self.active_modal = None
+
+        # Pilha de Undo para os vídeos
+        self.undo_stack = []
 
         self.active_tool = "ibeam"
         self.selected_clip = None
@@ -61,18 +64,32 @@ class VideoLabelerApp:
         ctrl_y = self.screen_h - timeline_h - 48
         self.btn_play_rect = pygame.Rect(10, ctrl_y, 75, 30)
         
-        # Botões de Ferramentas
         self.btn_tool_ibeam = pygame.Rect(90, ctrl_y, 35, 30)
         self.btn_tool_arrow = pygame.Rect(130, ctrl_y, 35, 30)
         self.btn_tool_cut = pygame.Rect(170, ctrl_y, 35, 30)
 
-        # Botões de Zoom (+) e (-) do lado das ferramentas
         self.btn_zoom_in = pygame.Rect(215, ctrl_y, 30, 30)
         self.btn_zoom_out = pygame.Rect(250, ctrl_y, 30, 30)
 
-        # Botões do Modo Hierárquico
         self.btn_cut_rect = pygame.Rect(290, ctrl_y, 100, 30)
         self.btn_undo_rect = pygame.Rect(400, ctrl_y, 110, 30)
+
+    def save_undo_state(self):
+        """Salva o estado atual do engine de vídeos na pilha de desfazer."""
+        state = self.engine.to_dict()
+        self.undo_stack.append(state)
+        if len(self.undo_stack) > 30:
+            self.undo_stack.pop(0)
+
+    def undo(self):
+        """Executa a ação de desfazer (Ctrl+Z)."""
+        if self.undo_stack:
+            prev_state = self.undo_stack.pop()
+            self.engine.load_dict(prev_state)
+            self.selected_clip = None
+            self.model.set_total_frames(self.engine.get_total_timeline_frames())
+        elif self.model.mode == AnnotationModel.MODE_HIERARCHICAL:
+            self.model.undo_hierarchical_cut()
 
     def request_mode_change(self, new_mode):
         self.model.mode = new_mode
@@ -87,14 +104,12 @@ class VideoLabelerApp:
         track_w = self.timeline.rect.width - self.timeline.header_w - 10
         total_frames = max(1, self.engine.get_total_timeline_frames())
 
-        # Se o cursor estiver sobre a área de trilhas da linha do tempo
         if mouse_pos and track_x <= mouse_pos[0] <= track_x + track_w and self.timeline.rect.y <= mouse_pos[1] <= self.timeline.rect.bottom:
             offset_in_view = mouse_pos[0] - track_x
             virtual_x_old = offset_in_view + self.timeline.scroll_offset_x
             virtual_x_new = virtual_x_old * (new_zoom / old_zoom)
             new_scroll = virtual_x_new - offset_in_view
         else:
-            # Caso o zoom seja alterado via botões, centraliza na agulha (playhead)
             playhead_ratio = self.current_frame / float(total_frames)
             virtual_playhead_new = playhead_ratio * (track_w * new_zoom)
             new_scroll = virtual_playhead_new - (track_w / 2)
@@ -190,13 +205,11 @@ class VideoLabelerApp:
     def draw_controls(self):
         m_pos = pygame.mouse.get_pos()
 
-        # Botão PLAY
         play_color = (60, 140, 60) if self.btn_play_rect.collidepoint(m_pos) else ((50, 120, 50) if self.playing else (70, 70, 70))
         pygame.draw.rect(self.screen, play_color, self.btn_play_rect, border_radius=4)
         t_play = self.font.render("PAUSE" if self.playing else "PLAY", True, (255, 255, 255))
         self.screen.blit(t_play, t_play.get_rect(center=self.btn_play_rect.center))
 
-        # Desenho dos Botões de Ferramenta
         tools = [
             ("ibeam", self.btn_tool_ibeam),
             ("arrow", self.btn_tool_arrow),
@@ -229,7 +242,6 @@ class VideoLabelerApp:
                 pygame.draw.line(self.screen, icon_col, (cx - 4, cy + 4), (cx + 5, cy - 6), 2)
                 pygame.draw.line(self.screen, icon_col, (cx + 4, cy + 4), (cx - 5, cy - 6), 2)
 
-        # Botões de ZOOM (+) e (-)
         for b_rect, symbol in [(self.btn_zoom_in, "+"), (self.btn_zoom_out, "-")]:
             is_hover = b_rect.collidepoint(m_pos)
             bg_col = (70, 70, 70) if is_hover else (45, 45, 45)
@@ -241,7 +253,6 @@ class VideoLabelerApp:
         t_zoom = self.font.render(f"Zoom: {self.zoom_level:.1f}x", True, (160, 160, 160))
         self.screen.blit(t_zoom, (self.btn_zoom_out.right + 10, self.btn_play_rect.centery - t_zoom.get_height() // 2))
 
-        # Botões do Modo Hierárquico
         if self.model.mode == AnnotationModel.MODE_HIERARCHICAL:
             cut_color = (210, 90, 50) if self.btn_cut_rect.collidepoint(m_pos) else (180, 80, 40)
             pygame.draw.rect(self.screen, cut_color, self.btn_cut_rect, border_radius=4)
@@ -266,7 +277,6 @@ class VideoLabelerApp:
 
             self.process_pending_events()
 
-            # --- Navegação pelas Setas do Teclado ---
             keys = pygame.key.get_pressed()
             scroll_speed = 20
             track_w = self.timeline.rect.width - self.timeline.header_w - 10
@@ -299,7 +309,6 @@ class VideoLabelerApp:
                         if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
                             self.timeline.scroll_offset_x -= e.y * 30
                         else:
-                            # Aplica Zoom mantendo a posição sob o mouse fixa
                             self.apply_zoom(0.2 if e.y > 0 else -0.2, mouse_pos=m_pos)
 
                 elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
@@ -333,7 +342,7 @@ class VideoLabelerApp:
                         if self.btn_cut_rect.collidepoint(pos):
                             self.model.add_hierarchical_cut(self.current_frame)
                         elif self.btn_undo_rect.collidepoint(pos):
-                            self.model.undo_hierarchical_cut()
+                            self.undo()
 
                     if self.model.mode == AnnotationModel.MODE_CATEGORICAL:
                         for lbl, r in self.label_panel.label_rects.items():
@@ -352,6 +361,7 @@ class VideoLabelerApp:
 
                             elif self.active_tool == "arrow":
                                 if clip is not None:
+                                    self.save_undo_state()
                                     self.selected_clip = clip
                                     self.is_dragging_clip = True
                                     self.drag_start_x = pos[0]
@@ -361,6 +371,7 @@ class VideoLabelerApp:
 
                             elif self.active_tool == "cut":
                                 if clip is not None and clicked_frame is not None:
+                                    self.save_undo_state()
                                     new_clip = clip.split(clicked_frame)
                                     if new_clip:
                                         self.engine.add_clip(new_clip)
@@ -390,8 +401,17 @@ class VideoLabelerApp:
                     self.is_dragging_playhead = False
 
                 elif e.type == pygame.KEYDOWN:
-                    if e.key in (pygame.K_DELETE, pygame.K_BACKSPACE):
+                    # Atalho Ctrl+Z
+                    if e.key == pygame.K_z and (e.mod & pygame.KMOD_CTRL or e.mod & pygame.KMOD_META):
+                        self.undo()
+
+                    # Atalho tecla C para corte de anotação
+                    elif e.key == pygame.K_c and self.model.mode == AnnotationModel.MODE_HIERARCHICAL:
+                        self.model.add_hierarchical_cut(self.current_frame)
+
+                    elif e.key in (pygame.K_DELETE, pygame.K_BACKSPACE):
                         if self.selected_clip is not None:
+                            self.save_undo_state()
                             self.engine.delete_clip(self.selected_clip)
                             self.selected_clip = None
                             self.model.set_total_frames(self.engine.get_total_timeline_frames())

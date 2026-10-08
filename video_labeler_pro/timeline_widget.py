@@ -1,4 +1,5 @@
 import pygame
+from models import AnnotationModel
 
 class MultiTrackTimeline:
     def __init__(self, x, y, w, h):
@@ -29,30 +30,70 @@ class MultiTrackTimeline:
         track_x = self.rect.x + self.header_w
         track_w = self.rect.width - self.header_w - 10
 
-        # Aplicação do Zoom: a largura virtual da trilha aumenta proporcionalmente
         virtual_track_w = int(track_w * zoom_level)
         max_scroll = max(0, virtual_track_w - track_w)
         self.scroll_offset_x = max(0, min(self.scroll_offset_x, max_scroll))
 
         self.eye_rects.clear()
         
-        # Área recortada (Clip Viewport) para os blocos não vazarem o header
+        # Área de exibição recortada (não vaza para o cabeçalho)
         track_clip_rect = pygame.Rect(track_x, self.rect.y, track_w, self.rect.height)
         surface.set_clip(track_clip_rect)
 
-        num_tracks = engine.get_num_tracks()
-        row_h = max(26, (self.rect.height - 15) // max(1, num_tracks))
+        num_video_tracks = engine.get_num_tracks()
+        total_rows = max(1, num_video_tracks + 1)  # 1 linha para Anotações + N para Vídeos
+        row_h = max(22, (self.rect.height - 15) // total_rows)
 
-        if num_tracks > 0:
-            for t_idx in range(num_tracks):
-                row_y = self.rect.y + 8 + t_idx * row_h
+        # --- 1. DESENHAR TRILHA DE ANOTAÇÃO (Primeira linha) ---
+        ann_row_y = self.rect.y + 8
+        ann_bar_r = pygame.Rect(track_x, ann_row_y + 2, track_w, row_h - 4)
+        pygame.draw.rect(surface, (30, 30, 35), ann_bar_r, border_radius=3)
+
+        if model.mode == AnnotationModel.MODE_HIERARCHICAL:
+            segments = model.get_hierarchical_segments()
+            palette = [(180, 80, 40), (60, 120, 180), (140, 60, 160), (50, 150, 100)]
+            for idx, (s_start, s_end) in enumerate(segments):
+                rel_start = s_start / float(total_frames)
+                rel_dur = (s_end - s_start) / float(total_frames)
+                px = track_x + int(rel_start * virtual_track_w) - self.scroll_offset_x
+                pw = max(2, int(rel_dur * virtual_track_w))
+                
+                seg_r = pygame.Rect(px, ann_row_y + 3, pw, row_h - 6)
+                col = palette[idx % len(palette)]
+                pygame.draw.rect(surface, col, seg_r, border_radius=2)
+                pygame.draw.rect(surface, (220, 220, 220), seg_r, width=1, border_radius=2)
+
+                if pw > 35:
+                    lbl = self.font.render(f"Ep. {idx+1}", True, (255, 255, 255))
+                    surface.blit(lbl, (px + 4, ann_row_y + (row_h - lbl.get_height()) // 2))
+
+        elif model.mode == AnnotationModel.MODE_CATEGORICAL:
+            if len(model.series) > 0:
+                curr_lbl_id = model.series[0]
+                start_f = 0
+                for f in range(1, len(model.series)):
+                    lbl_id = model.series[f]
+                    if lbl_id != curr_lbl_id or f == len(model.series) - 1:
+                        if curr_lbl_id != -1:
+                            rel_start = start_f / float(total_frames)
+                            rel_dur = (f - start_f) / float(total_frames)
+                            px = track_x + int(rel_start * virtual_track_w) - self.scroll_offset_x
+                            pw = max(2, int(rel_dur * virtual_track_w))
+                            seg_r = pygame.Rect(px, ann_row_y + 3, pw, row_h - 6)
+                            col = model._get_color(curr_lbl_id)
+                            pygame.draw.rect(surface, col, seg_r, border_radius=2)
+                        start_f = f
+                        curr_lbl_id = lbl_id
+
+        # --- 2. DESENHAR TRILHAS DE VÍDEO ---
+        if num_video_tracks > 0:
+            for t_idx in range(num_video_tracks):
+                row_y = ann_row_y + (t_idx + 1) * row_h
                 is_en = engine.is_track_enabled(t_idx)
 
-                # Fundo da trilha
                 track_bar_r = pygame.Rect(track_x, row_y + 2, track_w, row_h - 4)
                 pygame.draw.rect(surface, (35, 35, 35), track_bar_r, border_radius=3)
 
-                # Clipes com Zoom e Scroll
                 for clip in engine.clips:
                     if clip.track_idx == t_idx:
                         rel_start = clip.timeline_start / float(total_frames)
@@ -82,7 +123,7 @@ class MultiTrackTimeline:
                             txt_s = self.font.render(txt_name, True, (255, 255, 255) if is_en else (160, 160, 160))
                             surface.blit(txt_s, (clip_px + 4, row_y + (row_h - txt_s.get_height()) // 2))
 
-            # Playhead
+            # AGULHA (Playhead)
             playhead_x = track_x + int((current_frame / float(total_frames)) * virtual_track_w) - self.scroll_offset_x
             if track_x <= playhead_x <= track_x + track_w:
                 pygame.draw.line(surface, (255, 60, 60), (playhead_x, self.rect.y + 4), (playhead_x, self.rect.bottom - 4), 2)
@@ -92,22 +133,26 @@ class MultiTrackTimeline:
                     (playhead_x, self.rect.y + 7)
                 ])
 
-        surface.set_clip(None)  # Libera a máscara para desenhar o Header estático
+        surface.set_clip(None)
 
-        # Desenhar Cabeçalho Estático das Trilhas (Fica fixo por cima da rolagem)
+        # --- 3. CABEÇALHO ESTÁTICO (Fixo na esquerda) ---
         pygame.draw.rect(surface, (25, 25, 25), (self.rect.x, self.rect.y, self.header_w - 5, self.rect.height), border_radius=6)
         pygame.draw.line(surface, (50, 50, 50), (track_x - 5, self.rect.y), (track_x - 5, self.rect.bottom), 1)
 
-        if num_tracks == 0:
+        # Rótulo do Cabeçalho de Anotações
+        lbl_ann = self.font.render("Trilha Anotação", True, (255, 200, 100))
+        surface.blit(lbl_ann, (self.rect.x + 12, ann_row_y + (row_h - lbl_ann.get_height()) // 2))
+
+        if num_video_tracks == 0:
             msg = self.font.render("Nenhum vídeo carregado na linha do tempo", True, (100, 100, 100))
             surface.blit(msg, msg.get_rect(center=(self.rect.centerx + self.header_w // 2, self.rect.centery)))
             return
 
-        enabled_count = sum(1 for t in range(num_tracks) if engine.is_track_enabled(t))
+        enabled_count = sum(1 for t in range(num_video_tracks) if engine.is_track_enabled(t))
         m_pos = pygame.mouse.get_pos()
 
-        for t_idx in range(num_tracks):
-            row_y = self.rect.y + 8 + t_idx * row_h
+        for t_idx in range(num_video_tracks):
+            row_y = ann_row_y + (t_idx + 1) * row_h
             eye_r = pygame.Rect(self.rect.x + 8, row_y + (row_h - 20) // 2, 24, 20)
             self.eye_rects[t_idx] = eye_r
 
@@ -119,7 +164,7 @@ class MultiTrackTimeline:
             status = 'active' if is_en else ('prohibited' if enabled_count >= 2 else 'inactive')
             self.draw_eye_icon(surface, eye_r, status)
 
-            lbl_surf = self.font.render(f"Trilha {t_idx + 1}", True, (220, 220, 220) if is_en else (120, 120, 120))
+            lbl_surf = self.font.render(f"Trilha Vídeo {t_idx + 1}", True, (220, 220, 220) if is_en else (120, 120, 120))
             surface.blit(lbl_surf, (self.rect.x + 36, row_y + (row_h - lbl_surf.get_height()) // 2))
 
     def handle_eye_click(self, pos, engine):
@@ -146,9 +191,14 @@ class MultiTrackTimeline:
         if num_tracks == 0:
             return None, clicked_frame
 
-        row_h = max(26, (self.rect.height - 15) // num_tracks)
-        t_idx = int((pos[1] - (self.rect.y + 8)) // row_h)
+        total_rows = max(1, num_tracks + 1)
+        row_h = max(22, (self.rect.height - 15) // total_rows)
+        row_idx = int((pos[1] - (self.rect.y + 8)) // row_h)
 
+        if row_idx == 0:
+            return None, clicked_frame
+
+        t_idx = row_idx - 1
         if 0 <= t_idx < num_tracks:
             for clip in engine.clips:
                 if clip.track_idx == t_idx and clip.timeline_start <= clicked_frame < clip.timeline_end:
