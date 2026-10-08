@@ -49,6 +49,8 @@ class AnnotationModel:
     MODE_CATEGORICAL = "Categorizado / Episódios"
     MODE_HIERARCHICAL = "Hierárquico"
 
+    DEFAULT_CATEGORIES = ["Ação", "Interação", "Objeto", "Cena", "Outro"]
+
     def __init__(self, total_timeline_frames=1800, fps=30.0):
         self.mode = self.MODE_CATEGORICAL
         self.total_frames = total_timeline_frames
@@ -58,11 +60,61 @@ class AnnotationModel:
         self.series = np.full(self.total_frames + 1, -1, dtype=int)
         self.label_map = {"None": -1}
         self.color_map = {-1: (50, 50, 50)}
-        self.available_labels = []
-        self.selected_label = None
+        self.available_labels = list(self.DEFAULT_CATEGORIES)
+        self.selected_label = self.available_labels[0] if self.available_labels else None
 
         # --- Dados Hierárquicos ---
         self.cuts_history = []
+
+    @property
+    def CATEGORIES(self):
+        return self.available_labels
+
+    @property
+    def categorical_annotations(self):
+        """Mapeamento auxiliar para serialização de anotações por frame em JSON."""
+        annotations = {}
+        id_to_label = {v: k for k, v in self.label_map.items()}
+        for idx, val in enumerate(self.series):
+            if val != -1 and val in id_to_label:
+                annotations[str(idx)] = id_to_label[val]
+        return annotations
+
+    @categorical_annotations.setter
+    def categorical_annotations(self, annotations_dict):
+        """Carrega as anotações do dicionário (JSON) de volta para o vetor numpy (series)."""
+        self.reset_categorical()
+        if not isinstance(annotations_dict, dict):
+            return
+
+        for frame_str, lbl_name in annotations_dict.items():
+            try:
+                frame_idx = int(frame_str)
+            except (ValueError, TypeError):
+                continue
+
+            if 0 <= frame_idx < len(self.series):
+                if lbl_name not in self.available_labels:
+                    self.available_labels.append(lbl_name)
+
+                if lbl_name not in self.label_map:
+                    lbl_id = max(self.label_map.values(), default=-1) + 1
+                    self.label_map[lbl_name] = lbl_id
+                    self._get_color(lbl_id)
+                else:
+                    lbl_id = self.label_map[lbl_name]
+
+                self.series[frame_idx] = lbl_id
+
+    @property
+    def hierarchical_cuts(self):
+        """Propriedade para compatibilidade com o histórico de cortes."""
+        return self.cuts_history
+
+    @hierarchical_cuts.setter
+    def hierarchical_cuts(self, cuts):
+        """Permite restaurar o histórico de cortes ao carregar o projeto."""
+        self.cuts_history = list(cuts) if cuts is not None else []
 
     def set_total_frames(self, frames):
         old_frames = len(self.series)

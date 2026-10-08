@@ -1,20 +1,21 @@
 import os
-# Desativa decodificação paralela instável do FFmpeg
 os.environ["OPENCV_FFMPEG_THREAD_COUNT"] = "1"
 
 import cv2
 import pygame
 
 class VideoClip:
-    def __init__(self, path, clip_id, fps, total_frames):
+    def __init__(self, path, clip_id, fps, total_frames, in_point=0, out_point=None, timeline_start=0, track_idx=0):
         self.path = path
         self.clip_id = clip_id
         self.fps = fps
-        self.duration_frames = total_frames
-        self.enabled = False  # Controlado pelo botão de olho
-        self.cap = cv2.VideoCapture(path)
+        self.total_source_frames = total_frames
+        self.in_point = in_point
+        self.out_point = total_frames if out_point is None else out_point
+        self.timeline_start = timeline_start
+        self.track_idx = track_idx
         
-        # Cache de renderização
+        self.cap = cv2.VideoCapture(path)
         self.last_frame_idx = -1
         self.last_surface = None
 
@@ -23,30 +24,37 @@ class VideoClip:
         return os.path.basename(self.path)
 
     @property
-    def timeline_start(self):
-        return 0  # Em trilhas paralelas, todos iniciam no frame 0
+    def duration_frames(self):
+        return max(1, self.out_point - self.in_point)
 
     @property
     def timeline_end(self):
-        return self.duration_frames
+        return self.timeline_start + self.duration_frames
 
-    def get_frame_surface(self, local_frame, target_height=540):
-        if local_frame < 0 or local_frame >= self.duration_frames:
+    def global_to_source_frame(self, global_frame):
+        if self.timeline_start <= global_frame < self.timeline_end:
+            rel_frame = global_frame - self.timeline_start
+            return self.in_point + rel_frame
+        return None
+
+    def get_frame_surface(self, global_frame, target_height=540):
+        source_frame = self.global_to_source_frame(global_frame)
+        if source_frame is None or source_frame < 0 or source_frame >= self.total_source_frames:
             return None
 
-        if local_frame == self.last_frame_idx and self.last_surface is not None:
+        if source_frame == self.last_frame_idx and self.last_surface is not None:
             return self.last_surface
 
-        if local_frame == self.last_frame_idx + 1:
+        if source_frame == self.last_frame_idx + 1:
             ret, frame = self.cap.read()
         else:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, local_frame)
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, source_frame)
             ret, frame = self.cap.read()
 
         if not ret or frame is None:
             return self.last_surface
 
-        self.last_frame_idx = local_frame
+        self.last_frame_idx = source_frame
 
         h, w, _ = frame.shape
         aspect_ratio = w / h
@@ -59,6 +67,53 @@ class VideoClip:
         self.last_surface = pygame.surfarray.make_surface(frame_rgb)
         return self.last_surface
 
+    def split(self, cut_global_frame):
+        if not (self.timeline_start < cut_global_frame < self.timeline_end):
+            return None
+
+        offset = cut_global_frame - self.timeline_start
+        cut_source_frame = self.in_point + offset
+
+        old_out = self.out_point
+        self.out_point = cut_source_frame
+
+        new_clip = VideoClip(
+            path=self.path,
+            clip_id=self.clip_id,
+            fps=self.fps,
+            total_frames=self.total_source_frames,
+            in_point=cut_source_frame,
+            out_point=old_out,
+            timeline_start=cut_global_frame,
+            track_idx=self.track_idx
+        )
+        return new_clip
+
+    def to_dict(self):
+        return {
+            "path": self.path,
+            "clip_id": self.clip_id,
+            "fps": self.fps,
+            "total_source_frames": self.total_source_frames,
+            "in_point": self.in_point,
+            "out_point": self.out_point,
+            "timeline_start": self.timeline_start,
+            "track_idx": self.track_idx
+        }
+
+    @staticmethod
+    def from_dict(d):
+        return VideoClip(
+            path=d["path"],
+            clip_id=d["clip_id"],
+            fps=d["fps"],
+            total_frames=d["total_source_frames"],
+            in_point=d["in_point"],
+            out_point=d["out_point"],
+            timeline_start=d["timeline_start"],
+            track_idx=d["track_idx"]
+        )
+
     def release(self):
         if self.cap:
             self.cap.release()
@@ -67,36 +122,71 @@ class VideoClip:
 class MultiVideoEngine:
     def __init__(self):
         self.clips = []
+        self.track_enabled_state = {}
 
     def add_clip(self, clip):
         self.clips.append(clip)
+        if clip.track_idx not in self.track_enabled_state:
+            self.track_enabled_state[clip.track_idx] = (clip.track_idx < 2)
 
     def clear(self):
         for clip in self.clips:
             clip.release()
         self.clips.clear()
+        self.track_enabled_state.clear()
+
+    def get_num_tracks(self):
+        if not self.clips:
+            return 0
+        return max(c.track_idx for c in self.clips) + 1
+
+    def is_track_enabled(self, track_idx):
+        return self.track_enabled_state.get(track_idx, False)
+
+    def toggle_track_enabled(self, track_idx):
+        enabled_count = sum(1 for t, en in self.track_enabled_state.items() if en)
+        curr = self.is_track_enabled(track_idx)
+        if curr:
+            self.track_enabled_state[track_idx] = False
+            return True
+        else:
+            if enabled_count < 2:
+                self.track_enabled_state[track_idx] = True
+                return True
+            return False
 
     def get_total_timeline_frames(self):
         if not self.clips:
             return 0
-        # A duração total da timeline paralela é a duração do maior vídeo
-        return max(c.duration_frames for c in self.clips)
+        return max(c.timeline_end for c in self.clips)
 
-    def get_enabled_clips(self):
-        return [c for c in self.clips if c.enabled]
+    def get_active_clips_at_frame(self, global_frame):
+        active = []
+        num_tracks = self.get_num_tracks()
+        for t_idx in range(num_tracks):
+            if self.is_track_enabled(t_idx):
+                for clip in self.clips:
+                    if clip.track_idx == t_idx and clip.timeline_start <= global_frame < clip.timeline_end:
+                        active.append(clip)
+                        break
+        return active[:2]
 
-    def toggle_clip_enabled(self, clip_idx):
-        """Alterna a visibilidade do vídeo respeitando o limite máximo de 2 ativos."""
-        if 0 <= clip_idx < len(self.clips):
-            clip = self.clips[clip_idx]
-            enabled_count = len(self.get_enabled_clips())
-            
-            if clip.enabled:
-                clip.enabled = False
-            else:
-                if enabled_count < 2:
-                    clip.enabled = True
-                    return True
-                else:
-                    return False  # Bloqueado (já existem 2 habilitados)
-        return False
+    def delete_clip(self, clip):
+        if clip in self.clips:
+            clip.release()
+            self.clips.remove(clip)
+
+    def to_dict(self):
+        return {
+            "clips": [c.to_dict() for c in self.clips],
+            "track_enabled_state": {str(k): v for k, v in self.track_enabled_state.items()}
+        }
+
+    def load_dict(self, data):
+        self.clear()
+        for clip_d in data.get("clips", []):
+            if os.path.exists(clip_d["path"]):
+                c = VideoClip.from_dict(clip_d)
+                self.clips.append(c)
+        
+        self.track_enabled_state = {int(k): v for k, v in data.get("track_enabled_state", {}).items()}

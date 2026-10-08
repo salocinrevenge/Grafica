@@ -1,0 +1,36 @@
+{
+    "version": "1.0",
+    "current_frame": 83,
+    "zoom_level": 1.0,
+    "model_mode": "Categorizado / Epis\u00f3dios",
+    "engine": {
+        "clips": [
+            {
+                "path": "/home/nicolas/Programas/Grafica/videos/hanoi2/20240416_104814.mp4",
+                "clip_id": 1,
+                "fps": 59.632825310902625,
+                "total_source_frames": 14685,
+                "in_point": 864,
+                "out_point": 14685,
+                "timeline_start": 864,
+                "track_idx": 1
+            },
+            {
+                "path": "/home/nicolas/Programas/Grafica/videos/hanoi2/20240417_100937.mp4",
+                "clip_id": 0,
+                "fps": 59.63322235930134,
+                "total_source_frames": 16255,
+                "in_point": 1804,
+                "out_point": 16255,
+                "timeline_start": 1804,
+                "track_idx": 0
+            }
+        ],
+        "track_enabled_state": {
+            "0": true,
+            "1": true
+        }
+    },
+    "categorical_annotations": {},
+    "hierarchical_cuts": []
+}
