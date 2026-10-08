@@ -20,7 +20,7 @@ class ViewportManager:
 
         if not active_clips:
             pygame.draw.rect(surface, (15, 15, 15), self.rect, border_radius=6)
-            msg = "Aguardando seleção de vídeos..." if is_loading_files else "Nenhum vídeo ativo neste frame. Ligue o olho (👁️) de uma trilha."
+            msg = "Aguardando seleção de vídeos..." if is_loading_files else "Nenhum vídeo ativo neste frame. Ligue o olho de uma trilha."
             txt = self.font.render(msg, True, (160, 160, 160))
             surface.blit(txt, txt.get_rect(center=self.rect.center))
             return

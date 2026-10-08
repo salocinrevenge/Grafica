@@ -1,8 +1,8 @@
 {
     "version": "1.0",
-    "current_frame": 83,
+    "current_frame": 5754,
     "zoom_level": 1.0,
-    "model_mode": "Categorizado / Epis\u00f3dios",
+    "model_mode": "categorical",
     "engine": {
         "clips": [
             {
@@ -10,9 +10,9 @@
                 "clip_id": 1,
                 "fps": 59.632825310902625,
                 "total_source_frames": 14685,
-                "in_point": 864,
-                "out_point": 14685,
-                "timeline_start": 864,
+                "in_point": 6487,
+                "out_point": 12241,
+                "timeline_start": 0,
                 "track_idx": 1
             },
             {
@@ -20,9 +20,9 @@
                 "clip_id": 0,
                 "fps": 59.63322235930134,
                 "total_source_frames": 16255,
-                "in_point": 1804,
-                "out_point": 16255,
-                "timeline_start": 1804,
+                "in_point": 7870,
+                "out_point": 13626,
+                "timeline_start": 0,
                 "track_idx": 0
             }
         ],

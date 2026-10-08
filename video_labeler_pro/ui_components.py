@@ -11,7 +11,7 @@ class MenuBar:
         self.btn_save_proj = pygame.Rect(125, 3, 110, 24)
         self.btn_load_proj = pygame.Rect(240, 3, 120, 24)
 
-        # Botões de Modo
+        # Botões de Modoa
         self.btn_mode_cat = pygame.Rect(width - 240, 3, 110, 24)
         self.btn_mode_hier = pygame.Rect(width - 120, 3, 110, 24)
 

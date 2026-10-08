@@ -12,11 +12,8 @@ class VideoClip:
         self.fps = fps
         self.total_source_frames = total_source_frames
         
-        # Trim (Pontos de entrada e saída no arquivo fonte)
         self.in_point = 0
         self.out_point = total_source_frames
-        
-        # Posição na timeline global (em frames)
         self.timeline_start = 0
 
     @property
@@ -28,7 +25,6 @@ class VideoClip:
         return self.timeline_start + self.duration_frames
 
     def global_to_source_frame(self, global_frame):
-        """Converte um frame da timeline global para o frame correspondente do arquivo fonte."""
         if self.timeline_start <= global_frame < self.timeline_end:
             rel_frame = global_frame - self.timeline_start
             return self.in_point + rel_frame
@@ -46,8 +42,8 @@ class Node:
 
 
 class AnnotationModel:
-    MODE_CATEGORICAL = "Categorizado / Episódios"
-    MODE_HIERARCHICAL = "Hierárquico"
+    MODE_CATEGORICAL = "categorical"
+    MODE_HIERARCHICAL = "hierarchical"
 
     DEFAULT_CATEGORIES = ["Ação", "Interação", "Objeto", "Cena", "Outro"]
 
@@ -56,14 +52,12 @@ class AnnotationModel:
         self.total_frames = total_timeline_frames
         self.fps = fps
         
-        # --- Dados Categorizados ---
         self.series = np.full(self.total_frames + 1, -1, dtype=int)
         self.label_map = {"None": -1}
         self.color_map = {-1: (50, 50, 50)}
         self.available_labels = list(self.DEFAULT_CATEGORIES)
         self.selected_label = self.available_labels[0] if self.available_labels else None
 
-        # --- Dados Hierárquicos ---
         self.cuts_history = []
 
     @property
@@ -72,7 +66,6 @@ class AnnotationModel:
 
     @property
     def categorical_annotations(self):
-        """Mapeamento auxiliar para serialização de anotações por frame em JSON."""
         annotations = {}
         id_to_label = {v: k for k, v in self.label_map.items()}
         for idx, val in enumerate(self.series):
@@ -82,7 +75,6 @@ class AnnotationModel:
 
     @categorical_annotations.setter
     def categorical_annotations(self, annotations_dict):
-        """Carrega as anotações do dicionário (JSON) de volta para o vetor numpy (series)."""
         self.reset_categorical()
         if not isinstance(annotations_dict, dict):
             return
@@ -108,12 +100,10 @@ class AnnotationModel:
 
     @property
     def hierarchical_cuts(self):
-        """Propriedade para compatibilidade com o histórico de cortes."""
         return self.cuts_history
 
     @hierarchical_cuts.setter
     def hierarchical_cuts(self, cuts):
-        """Permite restaurar o histórico de cortes ao carregar o projeto."""
         self.cuts_history = list(cuts) if cuts is not None else []
 
     def set_total_frames(self, frames):
@@ -132,7 +122,6 @@ class AnnotationModel:
     def reset_categorical(self):
         self.series.fill(-1)
 
-    # --- Métodos Hierárquicos ---
     def build_tree(self):
         root = Node(0, self.total_frames)
         history_records = []
@@ -183,7 +172,6 @@ class AnnotationModel:
             self.cuts_history.pop()
 
     def convert_hierarchical_to_categorical(self):
-        """Converte os segmentos hierárquicos em rótulos de episódios no modo categorizado."""
         self.reset_categorical()
         segments = self.get_hierarchical_segments()
         

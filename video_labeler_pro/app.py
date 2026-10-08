@@ -74,6 +74,36 @@ class VideoLabelerApp:
         self.btn_cut_rect = pygame.Rect(290, ctrl_y, 100, 30)
         self.btn_undo_rect = pygame.Rect(400, ctrl_y, 110, 30)
 
+    def request_mode_change(self, new_mode):
+        self.model.mode = new_mode
+
+    def apply_zoom(self, delta_zoom, mouse_pos=None):
+        old_zoom = self.zoom_level
+        new_zoom = max(1.0, min(10.0, round(old_zoom + delta_zoom, 1)))
+        if new_zoom == old_zoom:
+            return
+
+        track_x = self.timeline.rect.x + self.timeline.header_w
+        track_w = self.timeline.rect.width - self.timeline.header_w - 10
+        total_frames = max(1, self.engine.get_total_timeline_frames())
+
+        # Se o cursor estiver sobre a área de trilhas da linha do tempo
+        if mouse_pos and track_x <= mouse_pos[0] <= track_x + track_w and self.timeline.rect.y <= mouse_pos[1] <= self.timeline.rect.bottom:
+            offset_in_view = mouse_pos[0] - track_x
+            virtual_x_old = offset_in_view + self.timeline.scroll_offset_x
+            virtual_x_new = virtual_x_old * (new_zoom / old_zoom)
+            new_scroll = virtual_x_new - offset_in_view
+        else:
+            # Caso o zoom seja alterado via botões, centraliza na agulha (playhead)
+            playhead_ratio = self.current_frame / float(total_frames)
+            virtual_playhead_new = playhead_ratio * (track_w * new_zoom)
+            new_scroll = virtual_playhead_new - (track_w / 2)
+
+        virtual_track_w_new = int(track_w * new_zoom)
+        max_scroll = max(0, virtual_track_w_new - track_w)
+        self.timeline.scroll_offset_x = max(0, min(int(new_scroll), max_scroll))
+        self.zoom_level = new_zoom
+
     # --- Salvar / Carregar Projeto Assíncrono ---
     def open_file_dialog_async(self):
         if self.is_loading_files:
@@ -166,7 +196,7 @@ class VideoLabelerApp:
         t_play = self.font.render("PAUSE" if self.playing else "PLAY", True, (255, 255, 255))
         self.screen.blit(t_play, t_play.get_rect(center=self.btn_play_rect.center))
 
-        # Desenho dos Botões de Ferramenta (Agulha, Seta, Tesoura)
+        # Desenho dos Botões de Ferramenta
         tools = [
             ("ibeam", self.btn_tool_ibeam),
             ("arrow", self.btn_tool_arrow),
@@ -208,7 +238,6 @@ class VideoLabelerApp:
             t_sym = self.font.render(symbol, True, (255, 255, 255))
             self.screen.blit(t_sym, t_sym.get_rect(center=b_rect.center))
 
-        # Exibição do nível de Zoom atual
         t_zoom = self.font.render(f"Zoom: {self.zoom_level:.1f}x", True, (160, 160, 160))
         self.screen.blit(t_zoom, (self.btn_zoom_out.right + 10, self.btn_play_rect.centery - t_zoom.get_height() // 2))
 
@@ -228,6 +257,7 @@ class VideoLabelerApp:
         txt_info = self.font.render(info, True, (200, 200, 200))
         self.screen.blit(txt_info, (self.screen_w - 280 - txt_info.get_width(), self.btn_play_rect.centery - txt_info.get_height() // 2))
 
+
     def run(self):
         running = True
         while running:
@@ -235,6 +265,18 @@ class VideoLabelerApp:
             self.screen.fill((20, 20, 20))
 
             self.process_pending_events()
+
+            # --- Navegação pelas Setas do Teclado ---
+            keys = pygame.key.get_pressed()
+            scroll_speed = 20
+            track_w = self.timeline.rect.width - self.timeline.header_w - 10
+            virtual_track_w = int(track_w * self.zoom_level)
+            max_scroll = max(0, virtual_track_w - track_w)
+
+            if keys[pygame.K_LEFT]:
+                self.timeline.scroll_offset_x = max(0, self.timeline.scroll_offset_x - scroll_speed)
+            elif keys[pygame.K_RIGHT]:
+                self.timeline.scroll_offset_x = min(max_scroll, self.timeline.scroll_offset_x + scroll_speed)
 
             if self.playing and not self.active_modal and not self.is_loading_files:
                 self.current_frame += 1
@@ -251,20 +293,14 @@ class VideoLabelerApp:
                     self.screen = pygame.display.set_mode((self.screen_w, self.screen_h), pygame.RESIZABLE)
                     self.update_layout()
 
-                # Evento da Rodinha do Mouse (Zoom e Rolagem Horizontal)
                 elif e.type == pygame.MOUSEWHEEL:
                     m_pos = pygame.mouse.get_pos()
                     if self.timeline.rect.collidepoint(m_pos):
-                        keys = pygame.key.get_pressed()
                         if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
-                            # Rolagem Horizontal na linha do tempo quando Shift está pressionado
                             self.timeline.scroll_offset_x -= e.y * 30
                         else:
-                            # Zoom in / Zoom out direto na linha do tempo
-                            if e.y > 0:
-                                self.zoom_level = min(10.0, round(self.zoom_level + 0.2, 1))
-                            elif e.y < 0:
-                                self.zoom_level = max(1.0, round(self.zoom_level - 0.2, 1))
+                            # Aplica Zoom mantendo a posição sob o mouse fixa
+                            self.apply_zoom(0.2 if e.y > 0 else -0.2, mouse_pos=m_pos)
 
                 elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
                     pos = e.pos
@@ -288,11 +324,10 @@ class VideoLabelerApp:
                     elif self.btn_tool_cut.collidepoint(pos):
                         self.active_tool = "cut"
 
-                    # Cliques nos botões de Zoom
                     elif self.btn_zoom_in.collidepoint(pos):
-                        self.zoom_level = min(10.0, round(self.zoom_level + 0.5, 1))
+                        self.apply_zoom(0.5)
                     elif self.btn_zoom_out.collidepoint(pos):
-                        self.zoom_level = max(1.0, round(self.zoom_level - 0.5, 1))
+                        self.apply_zoom(-0.5)
 
                     elif self.model.mode == AnnotationModel.MODE_HIERARCHICAL:
                         if self.btn_cut_rect.collidepoint(pos):
@@ -305,7 +340,6 @@ class VideoLabelerApp:
                             if r.collidepoint(pos):
                                 self.model.selected_label = lbl
 
-                    # Clique e Interação na Timeline
                     if self.timeline.rect.collidepoint(pos):
                         toggled = self.timeline.handle_eye_click(pos, self.engine)
                         if not toggled:
