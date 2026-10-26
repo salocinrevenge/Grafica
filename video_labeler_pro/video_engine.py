@@ -24,6 +24,10 @@ class VideoClip:
         return os.path.basename(self.path)
 
     @property
+    def filepath(self):
+        return self.path
+
+    @property
     def duration_frames(self):
         return max(1, self.out_point - self.in_point)
 

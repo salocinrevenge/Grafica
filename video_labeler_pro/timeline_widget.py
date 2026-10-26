@@ -26,7 +26,7 @@ class MultiTrackTimeline:
         pygame.draw.rect(surface, (25, 25, 25), self.rect, border_radius=6)
         pygame.draw.rect(surface, (50, 50, 50), self.rect, width=1, border_radius=6)
 
-        total_frames = max(1, engine.get_total_timeline_frames())
+        total_frames = max(1, engine.get_total_timeline_frames() or model.total_frames)
         track_x = self.rect.x + self.header_w
         track_w = self.rect.width - self.header_w - 10
 
@@ -41,17 +41,51 @@ class MultiTrackTimeline:
         surface.set_clip(track_clip_rect)
 
         num_video_tracks = engine.get_num_tracks()
-        total_rows = max(1, num_video_tracks + 1)  # 1 linha para Anotações + N para Vídeos
-        row_h = max(22, (self.rect.height - 15) // total_rows)
+        has_multi_labels = (model.mode == AnnotationModel.MODE_HIERARCHICAL and model.has_loaded_labels)
+        num_ann_rows = len(model.loaded_labels) if has_multi_labels else 1
+        total_rows = max(1, num_video_tracks + num_ann_rows)
+        row_h = max(20, (self.rect.height - 15) // total_rows)
 
-        # --- 1. DESENHAR TRILHA DE ANOTAÇÃO (Primeira linha) ---
+        # --- 1. DESENHAR TRILHA(S) DE ANOTAÇÃO ---
         ann_row_y = self.rect.y + 8
-        ann_bar_r = pygame.Rect(track_x, ann_row_y + 2, track_w, row_h - 4)
-        pygame.draw.rect(surface, (30, 30, 35), ann_bar_r, border_radius=3)
+        palettes = [
+            [(180, 80, 40), (60, 120, 180), (140, 60, 160), (50, 150, 100)],
+            [(40, 140, 150), (190, 130, 40), (100, 80, 180), (170, 60, 90)]
+        ]
 
-        if model.mode == AnnotationModel.MODE_HIERARCHICAL:
+        if has_multi_labels:
+            for l_idx, label_track in enumerate(model.loaded_labels):
+                cur_ann_y = ann_row_y + l_idx * row_h
+                ann_bar_r = pygame.Rect(track_x, cur_ann_y + 2, track_w, row_h - 4)
+                pygame.draw.rect(surface, (30, 30, 35), ann_bar_r, border_radius=3)
+
+                segments = label_track.get_segments()
+                palette = palettes[l_idx % len(palettes)]
+                # Cada label tem seus segmentos na escala [0, label_track.number_steps]
+                denom_frames = float(max(1, label_track.number_steps))
+
+                for idx, (s_start, s_end) in enumerate(segments):
+                    rel_start = s_start / denom_frames
+                    rel_dur = (s_end - s_start) / denom_frames
+                    px = track_x + int(rel_start * virtual_track_w) - self.scroll_offset_x
+                    pw = max(2, int(rel_dur * virtual_track_w))
+
+                    seg_r = pygame.Rect(px, cur_ann_y + 3, pw, row_h - 6)
+                    col = palette[idx % len(palette)]
+                    pygame.draw.rect(surface, col, seg_r, border_radius=2)
+                    if pw > 4:
+                        pygame.draw.rect(surface, (220, 220, 220), seg_r, width=1, border_radius=2)
+
+                    if pw > 35:
+                        lbl = self.font.render(f"Ep. {idx+1}", True, (255, 255, 255))
+                        surface.blit(lbl, (px + 4, cur_ann_y + (row_h - lbl.get_height()) // 2))
+
+        elif model.mode == AnnotationModel.MODE_HIERARCHICAL:
+            ann_bar_r = pygame.Rect(track_x, ann_row_y + 2, track_w, row_h - 4)
+            pygame.draw.rect(surface, (30, 30, 35), ann_bar_r, border_radius=3)
+
             segments = model.get_hierarchical_segments()
-            palette = [(180, 80, 40), (60, 120, 180), (140, 60, 160), (50, 150, 100)]
+            palette = palettes[0]
             for idx, (s_start, s_end) in enumerate(segments):
                 rel_start = s_start / float(total_frames)
                 rel_dur = (s_end - s_start) / float(total_frames)
@@ -68,6 +102,9 @@ class MultiTrackTimeline:
                     surface.blit(lbl, (px + 4, ann_row_y + (row_h - lbl.get_height()) // 2))
 
         elif model.mode == AnnotationModel.MODE_CATEGORICAL:
+            ann_bar_r = pygame.Rect(track_x, ann_row_y + 2, track_w, row_h - 4)
+            pygame.draw.rect(surface, (30, 30, 35), ann_bar_r, border_radius=3)
+
             if len(model.series) > 0:
                 curr_lbl_id = model.series[0]
                 start_f = 0
@@ -88,7 +125,7 @@ class MultiTrackTimeline:
         # --- 2. DESENHAR TRILHAS DE VÍDEO ---
         if num_video_tracks > 0:
             for t_idx in range(num_video_tracks):
-                row_y = ann_row_y + (t_idx + 1) * row_h
+                row_y = ann_row_y + (t_idx + num_ann_rows) * row_h
                 is_en = engine.is_track_enabled(t_idx)
 
                 track_bar_r = pygame.Rect(track_x, row_y + 2, track_w, row_h - 4)
@@ -123,7 +160,8 @@ class MultiTrackTimeline:
                             txt_s = self.font.render(txt_name, True, (255, 255, 255) if is_en else (160, 160, 160))
                             surface.blit(txt_s, (clip_px + 4, row_y + (row_h - txt_s.get_height()) // 2))
 
-            # AGULHA (Playhead)
+        # AGULHA (Playhead)
+        if num_video_tracks > 0 or has_multi_labels:
             playhead_x = track_x + int((current_frame / float(total_frames)) * virtual_track_w) - self.scroll_offset_x
             if track_x <= playhead_x <= track_x + track_w:
                 pygame.draw.line(surface, (255, 60, 60), (playhead_x, self.rect.y + 4), (playhead_x, self.rect.bottom - 4), 2)
@@ -139,20 +177,30 @@ class MultiTrackTimeline:
         pygame.draw.rect(surface, (25, 25, 25), (self.rect.x, self.rect.y, self.header_w - 5, self.rect.height), border_radius=6)
         pygame.draw.line(surface, (50, 50, 50), (track_x - 5, self.rect.y), (track_x - 5, self.rect.bottom), 1)
 
-        # Rótulo do Cabeçalho de Anotações
-        lbl_ann = self.font.render("Trilha Anotação", True, (255, 200, 100))
-        surface.blit(lbl_ann, (self.rect.x + 12, ann_row_y + (row_h - lbl_ann.get_height()) // 2))
+        # Rótulo(s) do Cabeçalho de Anotações
+        if has_multi_labels:
+            header_colors = [(255, 200, 100), (100, 220, 255)]
+            for l_idx, label_track in enumerate(model.loaded_labels):
+                cur_ann_y = ann_row_y + l_idx * row_h
+                ep_cnt = label_track.get_num_episodes()
+                lbl_text = f"Label {l_idx + 1} ({ep_cnt} ep)"
+                lbl_ann = self.font.render(lbl_text, True, header_colors[l_idx % len(header_colors)])
+                surface.blit(lbl_ann, (self.rect.x + 12, cur_ann_y + (row_h - lbl_ann.get_height()) // 2))
+        else:
+            lbl_ann = self.font.render("Trilha Anotação", True, (255, 200, 100))
+            surface.blit(lbl_ann, (self.rect.x + 12, ann_row_y + (row_h - lbl_ann.get_height()) // 2))
 
         if num_video_tracks == 0:
-            msg = self.font.render("Nenhum vídeo carregado na linha do tempo", True, (100, 100, 100))
-            surface.blit(msg, msg.get_rect(center=(self.rect.centerx + self.header_w // 2, self.rect.centery)))
+            if not has_multi_labels:
+                msg = self.font.render("Nenhum vídeo carregado na linha do tempo", True, (100, 100, 100))
+                surface.blit(msg, msg.get_rect(center=(self.rect.centerx + self.header_w // 2, self.rect.centery)))
             return
 
         enabled_count = sum(1 for t in range(num_video_tracks) if engine.is_track_enabled(t))
         m_pos = pygame.mouse.get_pos()
 
         for t_idx in range(num_video_tracks):
-            row_y = ann_row_y + (t_idx + 1) * row_h
+            row_y = ann_row_y + (t_idx + num_ann_rows) * row_h
             eye_r = pygame.Rect(self.rect.x + 8, row_y + (row_h - 20) // 2, 24, 20)
             self.eye_rects[t_idx] = eye_r
 
@@ -174,10 +222,11 @@ class MultiTrackTimeline:
                 return True
         return False
 
-    def get_clip_and_frame_at_pixel(self, pos, engine, zoom_level=1.0):
+    def get_clip_and_frame_at_pixel(self, pos, engine, zoom_level=1.0, model=None):
         track_x = self.rect.x + self.header_w
         track_w = self.rect.width - self.header_w - 10
-        total_frames = max(1, engine.get_total_timeline_frames())
+        fallback_frames = model.total_frames if model else 1
+        total_frames = max(1, engine.get_total_timeline_frames() or fallback_frames)
 
         if not (track_x <= pos[0] <= track_x + track_w) or not (self.rect.y <= pos[1] <= self.rect.bottom):
             return None, None
@@ -191,14 +240,16 @@ class MultiTrackTimeline:
         if num_tracks == 0:
             return None, clicked_frame
 
-        total_rows = max(1, num_tracks + 1)
-        row_h = max(22, (self.rect.height - 15) // total_rows)
+        has_multi_labels = (model is not None and model.mode == AnnotationModel.MODE_HIERARCHICAL and model.has_loaded_labels)
+        num_ann_rows = len(model.loaded_labels) if has_multi_labels else 1
+        total_rows = max(1, num_tracks + num_ann_rows)
+        row_h = max(20, (self.rect.height - 15) // total_rows)
         row_idx = int((pos[1] - (self.rect.y + 8)) // row_h)
 
-        if row_idx == 0:
+        if row_idx < num_ann_rows:
             return None, clicked_frame
 
-        t_idx = row_idx - 1
+        t_idx = row_idx - num_ann_rows
         if 0 <= t_idx < num_tracks:
             for clip in engine.clips:
                 if clip.track_idx == t_idx and clip.timeline_start <= clicked_frame < clip.timeline_end:

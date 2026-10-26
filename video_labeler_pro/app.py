@@ -5,6 +5,7 @@ import pygame
 import cv2
 import json
 import threading
+import time
 
 from models import AnnotationModel
 from video_engine import MultiVideoEngine, VideoClip
@@ -13,6 +14,7 @@ from timeline_widget import MultiTrackTimeline
 from modals import ConfirmationModal
 from file_utils import FileDialogHelper
 from viewport_manager import ViewportManager
+from export_utils import export_project_data
 
 class VideoLabelerApp:
     def __init__(self):
@@ -35,7 +37,6 @@ class VideoLabelerApp:
         self.pending_mode_change = None
         self.active_modal = None
 
-        # Pilha de Undo para os vídeos
         self.undo_stack = []
 
         self.active_tool = "ibeam"
@@ -45,9 +46,21 @@ class VideoLabelerApp:
         self.drag_start_x = 0
         self.drag_initial_start = 0
 
+        # Estados assíncronos (Thread-safe)
         self.is_loading_files = False
+        self.is_exporting = False
+        self.export_progress_text = ""
+        self.pending_export_done = False
+        self.pending_error_msg = None
         self.pending_video_paths = None
+        self.pending_label_paths = None
         self.pending_project_load = None
+
+        # Caixa de entrada para número de episódios (fcluster)
+        self.episode_input_text = ""
+        self.episode_input_active = False
+
+        self.last_playback_time = time.time()
 
         self.update_layout()
 
@@ -71,18 +84,21 @@ class VideoLabelerApp:
         self.btn_zoom_in = pygame.Rect(215, ctrl_y, 30, 30)
         self.btn_zoom_out = pygame.Rect(250, ctrl_y, 30, 30)
 
-        self.btn_cut_rect = pygame.Rect(290, ctrl_y, 100, 30)
-        self.btn_undo_rect = pygame.Rect(400, ctrl_y, 110, 30)
+        self.btn_cut_rect = pygame.Rect(370, ctrl_y, 95, 30)
+        self.btn_undo_rect = pygame.Rect(470, ctrl_y, 120, 30)
+
+        # Controles de seleção do número de episódios (fcluster)
+        self.episode_input_rect = pygame.Rect(680, ctrl_y, 60, 30)
+        self.btn_apply_episodes_rect = pygame.Rect(745, ctrl_y, 60, 30)
+        self.btn_clear_labels_rect = pygame.Rect(815, ctrl_y, 105, 30)
 
     def save_undo_state(self):
-        """Salva o estado atual do engine de vídeos na pilha de desfazer."""
         state = self.engine.to_dict()
         self.undo_stack.append(state)
         if len(self.undo_stack) > 30:
             self.undo_stack.pop(0)
 
     def undo(self):
-        """Executa a ação de desfazer (Ctrl+Z)."""
         if self.undo_stack:
             prev_state = self.undo_stack.pop()
             self.engine.load_dict(prev_state)
@@ -119,55 +135,134 @@ class VideoLabelerApp:
         self.timeline.scroll_offset_x = max(0, min(int(new_scroll), max_scroll))
         self.zoom_level = new_zoom
 
-    # --- Salvar / Carregar Projeto Assíncrono ---
+    # --- Operações Assíncronas de Arquivo e Exportação ---
+
     def open_file_dialog_async(self):
-        if self.is_loading_files:
+        if self.is_loading_files or self.is_exporting:
             return
         self.is_loading_files = True
-        threading.Thread(target=self._file_dialog_worker, daemon=True).start()
+        threading.Thread(target=self._open_file_worker, daemon=True).start()
 
-    def _file_dialog_worker(self):
-        paths = FileDialogHelper.select_video_files()
-        self.pending_video_paths = paths
-        self.is_loading_files = False
+    def _open_file_worker(self):
+        try:
+            paths = FileDialogHelper.select_video_files()
+            if paths:
+                self.pending_video_paths = paths
+        except Exception as err:
+            self.pending_error_msg = f"Erro ao abrir vídeos: {err}"
+        finally:
+            self.is_loading_files = False
+
+    def open_labels_dialog_async(self):
+        if self.is_loading_files or self.is_exporting:
+            return
+        self.is_loading_files = True
+        threading.Thread(target=self._open_labels_worker, daemon=True).start()
+
+    def _open_labels_worker(self):
+        try:
+            paths = FileDialogHelper.select_label_files()
+            if paths:
+                self.pending_label_paths = paths
+        except Exception as err:
+            self.pending_error_msg = f"Erro ao abrir labels: {err}"
+        finally:
+            self.is_loading_files = False
+
+    def _apply_episode_count(self):
+        txt = self.episode_input_text.strip()
+        if txt.isdigit() and int(txt) > 0:
+            target = int(txt)
+            self.model.apply_fcluster(target)
+            if self.model.has_loaded_labels:
+                self.episode_input_text = str(self.model.loaded_labels[0].get_num_episodes())
+        self.episode_input_active = False
 
     def save_project_async(self):
-        if self.is_loading_files:
+        if self.is_loading_files or self.is_exporting:
             return
         self.is_loading_files = True
         threading.Thread(target=self._save_project_worker, daemon=True).start()
 
     def _save_project_worker(self):
-        save_path = FileDialogHelper.select_save_project_file()
-        if save_path:
-            project_data = {
-                "version": "1.0",
-                "current_frame": self.current_frame,
-                "zoom_level": self.zoom_level,
-                "model_mode": getattr(self.model, "mode", AnnotationModel.MODE_CATEGORICAL),
-                "engine": self.engine.to_dict(),
-                "categorical_annotations": getattr(self.model, "categorical_annotations", {}),
-                "hierarchical_cuts": getattr(self.model, "hierarchical_cuts", [])
-            }
-            with open(save_path, "w", encoding="utf-8") as f:
-                json.dump(project_data, f, indent=4)
-        self.is_loading_files = False
+        try:
+            save_path = FileDialogHelper.select_save_project_file()
+            if save_path:
+                project_data = {
+                    "version": "1.0",
+                    "current_frame": self.current_frame,
+                    "zoom_level": self.zoom_level,
+                    "model_mode": getattr(self.model, "mode", AnnotationModel.MODE_CATEGORICAL),
+                    "engine": self.engine.to_dict(),
+                    "categorical_annotations": getattr(self.model, "categorical_annotations", {}),
+                    "hierarchical_cuts": getattr(self.model, "hierarchical_cuts", []),
+                    "loaded_label_paths": [t.filepath for t in self.model.loaded_labels if t.filepath],
+                    "target_num_episodes": self.model.target_num_episodes
+                }
+                with open(save_path, "w", encoding="utf-8") as f:
+                    json.dump(project_data, f, indent=4)
+        except Exception as err:
+            self.pending_error_msg = f"Erro ao salvar projeto: {err}"
+        finally:
+            self.is_loading_files = False
 
     def load_project_async(self):
-        if self.is_loading_files:
+        if self.is_loading_files or self.is_exporting:
             return
         self.is_loading_files = True
         threading.Thread(target=self._load_project_worker, daemon=True).start()
 
     def _load_project_worker(self):
-        load_path = FileDialogHelper.select_open_project_file()
-        if load_path and os.path.exists(load_path):
-            with open(load_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            self.pending_project_load = data
-        self.is_loading_files = False
+        try:
+            load_path = FileDialogHelper.select_open_project_file()
+            if load_path and os.path.exists(load_path):
+                with open(load_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.pending_project_load = data
+        except Exception as err:
+            self.pending_error_msg = f"Erro ao carregar projeto: {err}"
+        finally:
+            self.is_loading_files = False
+
+    def export_data_async(self):
+        if self.is_loading_files or self.is_exporting:
+            return
+        self.is_exporting = True
+        self.export_progress_text = "Aguardando seleção de pasta..."
+        threading.Thread(target=self._export_worker, daemon=True).start()
+
+    def _export_worker(self):
+        try:
+            export_folder = FileDialogHelper.select_export_directory()
+            if not export_folder:
+                self.is_exporting = False
+                return
+
+            def progress_cb(track_idx, total_tracks, frame_idx, total_frames):
+                pct = int((frame_idx / float(total_frames)) * 100) if total_frames > 0 else 0
+                self.export_progress_text = f"Exportando Vídeo {track_idx + 1}/{total_tracks}: {pct}%"
+
+            export_project_data(export_folder, self.engine, self.model, progress_cb)
+            self.pending_export_done = True
+        except Exception as err:
+            self.pending_error_msg = f"Erro na exportação: {err}"
+        finally:
+            self.is_exporting = False
+
+    # --- Sincronização entre Worker Threads e a Thread Principal ---
 
     def process_pending_events(self):
+        if self.pending_error_msg is not None:
+            msg = self.pending_error_msg
+            self.pending_error_msg = None
+            self.active_modal = ConfirmationModal(
+                self.screen_w,
+                self.screen_h,
+                self.font,
+                f"Erro: {msg}",
+                lambda: setattr(self, 'active_modal', None)
+            )
+
         if self.pending_video_paths is not None:
             paths = self.pending_video_paths
             self.pending_video_paths = None
@@ -188,19 +283,74 @@ class VideoLabelerApp:
                 self.model.set_total_frames(self.engine.get_total_timeline_frames())
                 self.current_frame = 0
 
+        if self.pending_label_paths is not None:
+            paths = self.pending_label_paths
+            self.pending_label_paths = None
+            if paths:
+                try:
+                    self.model.load_hierarchical_label_files(paths)
+                    if self.model.has_loaded_labels:
+                        self.model.mode = AnnotationModel.MODE_HIERARCHICAL
+                        if self.engine.get_total_timeline_frames() == 0:
+                            max_steps = max(t.number_steps for t in self.model.loaded_labels)
+                            self.model.set_total_frames(max_steps)
+                        if self.episode_input_text.strip().isdigit() and int(self.episode_input_text.strip()) > 0:
+                            self.model.apply_fcluster(int(self.episode_input_text.strip()))
+                        else:
+                            self.episode_input_text = str(self.model.loaded_labels[0].get_num_episodes())
+                except Exception as err:
+                    self.pending_error_msg = f"Falha ao carregar labels: {err}"
+
         if self.pending_project_load is not None:
             data = self.pending_project_load
             self.pending_project_load = None
             
             self.playing = False
-            self.engine.load_dict(data.get("engine", {}))
-            self.model.mode = data.get("model_mode", AnnotationModel.MODE_CATEGORICAL)
-            self.model.categorical_annotations = data.get("categorical_annotations", {})
-            self.model.hierarchical_cuts = data.get("hierarchical_cuts", [])
-            self.model.set_total_frames(self.engine.get_total_timeline_frames())
-            self.current_frame = data.get("current_frame", 0)
-            self.zoom_level = data.get("zoom_level", 1.0)
-            self.selected_clip = None
+
+            # Caso o usuário tenha aberto diretamente um arquivo de label hierárquica em Carregar Projeto
+            if "first_layer_starts" in data and "above_layers_groups" in data and "engine" not in data:
+                from models import HierarchicalLabelTrack
+                track = HierarchicalLabelTrack(data, filepath="Label Carregada", fallback_total_frames=self.model.total_frames)
+                if len(self.model.loaded_labels) == 1:
+                    self.model.loaded_labels.append(track)
+                else:
+                    self.model.loaded_labels = [track]
+                self.model.mode = AnnotationModel.MODE_HIERARCHICAL
+                if self.engine.get_total_timeline_frames() == 0:
+                    self.model.set_total_frames(track.number_steps)
+                if self.episode_input_text.strip().isdigit() and int(self.episode_input_text.strip()) > 0:
+                    self.model.apply_fcluster(int(self.episode_input_text.strip()))
+                else:
+                    self.episode_input_text = str(track.get_num_episodes())
+            else:
+                self.engine.load_dict(data.get("engine", {}))
+                self.model.clear_loaded_labels()
+                self.model.mode = data.get("model_mode", AnnotationModel.MODE_CATEGORICAL)
+                self.model.categorical_annotations = data.get("categorical_annotations", {})
+                self.model.hierarchical_cuts = data.get("hierarchical_cuts", [])
+                self.model.set_total_frames(self.engine.get_total_timeline_frames() or self.model.total_frames)
+
+                saved_label_paths = data.get("loaded_label_paths", [])
+                if saved_label_paths:
+                    self.model.load_hierarchical_label_files(saved_label_paths)
+                saved_target_eps = data.get("target_num_episodes")
+                if saved_target_eps is not None:
+                    self.episode_input_text = str(saved_target_eps)
+                    self.model.apply_fcluster(saved_target_eps)
+
+                self.current_frame = data.get("current_frame", 0)
+                self.zoom_level = data.get("zoom_level", 1.0)
+                self.selected_clip = None
+
+        if self.pending_export_done:
+            self.pending_export_done = False
+            self.active_modal = ConfirmationModal(
+                self.screen_w,
+                self.screen_h,
+                self.font,
+                "Exportação concluída com sucesso!",
+                lambda: setattr(self, 'active_modal', None)
+            )
 
     def draw_controls(self):
         m_pos = pygame.mouse.get_pos()
@@ -254,20 +404,51 @@ class VideoLabelerApp:
         self.screen.blit(t_zoom, (self.btn_zoom_out.right + 10, self.btn_play_rect.centery - t_zoom.get_height() // 2))
 
         if self.model.mode == AnnotationModel.MODE_HIERARCHICAL:
-            cut_color = (210, 90, 50) if self.btn_cut_rect.collidepoint(m_pos) else (180, 80, 40)
+            locked = self.model.is_hierarchical_locked
+
+            if locked:
+                cut_color = (55, 55, 55)
+                undo_color = (55, 55, 55)
+                btn_fg = (110, 110, 110)
+            else:
+                cut_color = (210, 90, 50) if self.btn_cut_rect.collidepoint(m_pos) else (180, 80, 40)
+                undo_color = (150, 70, 170) if self.btn_undo_rect.collidepoint(m_pos) else (120, 60, 140)
+                btn_fg = (255, 255, 255)
+
             pygame.draw.rect(self.screen, cut_color, self.btn_cut_rect, border_radius=4)
-            t_cut = self.font.render("Cortar (C)", True, (255, 255, 255))
+            t_cut = self.font.render("Cortar (C)", True, btn_fg)
             self.screen.blit(t_cut, t_cut.get_rect(center=self.btn_cut_rect.center))
 
-            undo_color = (150, 70, 170) if self.btn_undo_rect.collidepoint(m_pos) else (120, 60, 140)
             pygame.draw.rect(self.screen, undo_color, self.btn_undo_rect, border_radius=4)
-            t_undo = self.font.render("Desfazer (Ctrl+Z)", True, (255, 255, 255))
+            t_undo = self.font.render("Desfazer (Ctrl+Z)", True, btn_fg)
             self.screen.blit(t_undo, t_undo.get_rect(center=self.btn_undo_rect.center))
+
+            # Caixa de escrita para selecionar número de episódios (fcluster)
+            lbl_ep = self.font.render("Episódios:", True, (200, 200, 200))
+            self.screen.blit(lbl_ep, (self.episode_input_rect.x - lbl_ep.get_width() - 6, self.btn_play_rect.centery - lbl_ep.get_height() // 2))
+
+            pygame.draw.rect(self.screen, (30, 30, 35), self.episode_input_rect, border_radius=4)
+            border_c = (100, 220, 120) if self.episode_input_active else (90, 90, 90)
+            pygame.draw.rect(self.screen, border_c, self.episode_input_rect, width=2 if self.episode_input_active else 1, border_radius=4)
+
+            disp_ep = self.episode_input_text + ("|" if self.episode_input_active else "")
+            t_ep_val = self.font.render(disp_ep, True, (255, 255, 255))
+            self.screen.blit(t_ep_val, (self.episode_input_rect.x + 6, self.episode_input_rect.centery - t_ep_val.get_height() // 2))
+
+            apply_col = (50, 150, 80) if self.btn_apply_episodes_rect.collidepoint(m_pos) else (40, 120, 65)
+            pygame.draw.rect(self.screen, apply_col, self.btn_apply_episodes_rect, border_radius=4)
+            t_apply = self.font.render("Aplicar", True, (255, 255, 255))
+            self.screen.blit(t_apply, t_apply.get_rect(center=self.btn_apply_episodes_rect.center))
+
+            if locked:
+                clr_col = (160, 60, 60) if self.btn_clear_labels_rect.collidepoint(m_pos) else (125, 45, 45)
+                pygame.draw.rect(self.screen, clr_col, self.btn_clear_labels_rect, border_radius=4)
+                t_clr = self.font.render("Limpar Labels", True, (255, 255, 255))
+                self.screen.blit(t_clr, t_clr.get_rect(center=self.btn_clear_labels_rect.center))
 
         info = f"Frame: {self.current_frame} / {self.model.total_frames}"
         txt_info = self.font.render(info, True, (200, 200, 200))
-        self.screen.blit(txt_info, (self.screen_w - 280 - txt_info.get_width(), self.btn_play_rect.centery - txt_info.get_height() // 2))
-
+        self.screen.blit(txt_info, (self.screen_w - 20 - txt_info.get_width(), self.btn_play_rect.centery - txt_info.get_height() // 2))
 
     def run(self):
         running = True
@@ -283,15 +464,24 @@ class VideoLabelerApp:
             virtual_track_w = int(track_w * self.zoom_level)
             max_scroll = max(0, virtual_track_w - track_w)
 
-            if keys[pygame.K_LEFT]:
-                self.timeline.scroll_offset_x = max(0, self.timeline.scroll_offset_x - scroll_speed)
-            elif keys[pygame.K_RIGHT]:
-                self.timeline.scroll_offset_x = min(max_scroll, self.timeline.scroll_offset_x + scroll_speed)
+            if not self.episode_input_active:
+                if keys[pygame.K_LEFT]:
+                    self.timeline.scroll_offset_x = max(0, self.timeline.scroll_offset_x - scroll_speed)
+                elif keys[pygame.K_RIGHT]:
+                    self.timeline.scroll_offset_x = min(max_scroll, self.timeline.scroll_offset_x + scroll_speed)
 
-            if self.playing and not self.active_modal and not self.is_loading_files:
-                self.current_frame += 1
-                if self.current_frame >= self.model.total_frames:
-                    self.current_frame = 0
+            # Controle de Playback em tempo real
+            if self.playing and not self.active_modal and not self.is_loading_files and not self.is_exporting:
+                now = time.time()
+                dt = now - self.last_playback_time
+                if dt >= (1.0 / 30.0): # 30 FPS playback target
+                    self.current_frame += 1
+                    max_frames = max(1, self.engine.get_total_timeline_frames() or self.model.total_frames)
+                    if self.current_frame >= max_frames:
+                        self.current_frame = 0
+                    self.last_playback_time = now
+            else:
+                self.last_playback_time = time.time()
 
             for e in pygame.event.get():
                 if e.type == pygame.QUIT:
@@ -303,6 +493,17 @@ class VideoLabelerApp:
                     self.screen = pygame.display.set_mode((self.screen_w, self.screen_h), pygame.RESIZABLE)
                     self.update_layout()
 
+                # Se houver Modal ativo, intercepta os cliques e ignora o resto da interface
+                elif self.active_modal:
+                    if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                        if hasattr(self.active_modal, 'handle_click'):
+                            self.active_modal.handle_click(e.pos)
+                        else:
+                            self.active_modal = None
+                    elif e.type == pygame.KEYDOWN and e.key in (pygame.K_RETURN, pygame.K_ESCAPE, pygame.K_SPACE):
+                        self.active_modal = None
+                    continue
+
                 elif e.type == pygame.MOUSEWHEEL:
                     m_pos = pygame.mouse.get_pos()
                     if self.timeline.rect.collidepoint(m_pos):
@@ -313,13 +514,34 @@ class VideoLabelerApp:
 
                 elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
                     pos = e.pos
+
+                    # Verifica clique na caixa de episódios antes de desativar o foco
+                    if self.model.mode == AnnotationModel.MODE_HIERARCHICAL and self.episode_input_rect.collidepoint(pos):
+                        self.episode_input_active = True
+                        continue
+                    elif self.model.mode == AnnotationModel.MODE_HIERARCHICAL and self.btn_apply_episodes_rect.collidepoint(pos):
+                        self._apply_episode_count()
+                        continue
+                    elif self.model.is_hierarchical_locked and self.btn_clear_labels_rect.collidepoint(pos):
+                        self.model.clear_loaded_labels()
+                        self.episode_input_text = ""
+                        self.episode_input_active = False
+                        continue
+                    else:
+                        if self.episode_input_active:
+                            self._apply_episode_count()
+
                     menu_action = self.menu_bar.handle_click(pos)
                     if menu_action == "Abrir Vídeos":
                         self.open_file_dialog_async()
+                    elif menu_action == "Abrir Labels":
+                        self.open_labels_dialog_async()
                     elif menu_action == "Salvar Projeto":
                         self.save_project_async()
                     elif menu_action == "Carregar Projeto":
                         self.load_project_async()
+                    elif menu_action == "Exportar":
+                        self.export_data_async()
                     elif menu_action in [AnnotationModel.MODE_CATEGORICAL, AnnotationModel.MODE_HIERARCHICAL]:
                         self.request_mode_change(menu_action)
 
@@ -338,7 +560,7 @@ class VideoLabelerApp:
                     elif self.btn_zoom_out.collidepoint(pos):
                         self.apply_zoom(-0.5)
 
-                    elif self.model.mode == AnnotationModel.MODE_HIERARCHICAL:
+                    elif self.model.mode == AnnotationModel.MODE_HIERARCHICAL and not self.model.is_hierarchical_locked:
                         if self.btn_cut_rect.collidepoint(pos):
                             self.model.add_hierarchical_cut(self.current_frame)
                         elif self.btn_undo_rect.collidepoint(pos):
@@ -352,11 +574,12 @@ class VideoLabelerApp:
                     if self.timeline.rect.collidepoint(pos):
                         toggled = self.timeline.handle_eye_click(pos, self.engine)
                         if not toggled:
-                            clip, clicked_frame = self.timeline.get_clip_and_frame_at_pixel(pos, self.engine, self.zoom_level)
+                            clip, clicked_frame = self.timeline.get_clip_and_frame_at_pixel(pos, self.engine, self.zoom_level, self.model)
 
                             if self.active_tool == "ibeam":
                                 if clicked_frame is not None:
-                                    self.current_frame = max(0, min(clicked_frame, max(1, self.engine.get_total_timeline_frames())))
+                                    max_f = max(1, self.engine.get_total_timeline_frames() or self.model.total_frames)
+                                    self.current_frame = max(0, min(clicked_frame, max_f))
                                     self.is_dragging_playhead = True
 
                             elif self.active_tool == "arrow":
@@ -382,7 +605,7 @@ class VideoLabelerApp:
                     if self.active_tool == "ibeam" and getattr(self, 'is_dragging_playhead', False):
                         track_x = self.timeline.rect.x + self.timeline.header_w
                         track_w = self.timeline.rect.width - self.timeline.header_w - 10
-                        total_f = max(1, self.engine.get_total_timeline_frames())
+                        total_f = max(1, self.engine.get_total_timeline_frames() or self.model.total_frames)
                         virtual_track_w = int(track_w * self.zoom_level)
                         rel_x = (e.pos[0] - track_x + self.timeline.scroll_offset_x) / float(virtual_track_w)
                         self.current_frame = max(0, min(total_f, int(rel_x * total_f)))
@@ -401,13 +624,37 @@ class VideoLabelerApp:
                     self.is_dragging_playhead = False
 
                 elif e.type == pygame.KEYDOWN:
-                    # Atalho Ctrl+Z
-                    if e.key == pygame.K_z and (e.mod & pygame.KMOD_CTRL or e.mod & pygame.KMOD_META):
-                        self.undo()
+                    if self.episode_input_active:
+                        if e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                            self._apply_episode_count()
+                        elif e.key == pygame.K_SPACE:
+                            self._apply_episode_count()
+                            self.playing = not self.playing
+                        elif e.key == pygame.K_ESCAPE:
+                            self.episode_input_active = False
+                        elif e.key == pygame.K_BACKSPACE:
+                            self.episode_input_text = self.episode_input_text[:-1]
+                        elif e.key == pygame.K_UP:
+                            cur_v = int(self.episode_input_text) if self.episode_input_text.isdigit() else 1
+                            self.episode_input_text = str(cur_v + 1)
+                            self.model.apply_fcluster(cur_v + 1)
+                        elif e.key == pygame.K_DOWN:
+                            cur_v = int(self.episode_input_text) if self.episode_input_text.isdigit() else 2
+                            new_v = max(1, cur_v - 1)
+                            self.episode_input_text = str(new_v)
+                            self.model.apply_fcluster(new_v)
+                        else:
+                            if e.unicode.isdigit():
+                                self.episode_input_text += e.unicode
+                        continue
 
-                    # Atalho tecla C para corte de anotação
+                    if e.key == pygame.K_z and (e.mod & pygame.KMOD_CTRL or e.mod & pygame.KMOD_META):
+                        if not self.model.is_hierarchical_locked or self.undo_stack:
+                            self.undo()
+
                     elif e.key == pygame.K_c and self.model.mode == AnnotationModel.MODE_HIERARCHICAL:
-                        self.model.add_hierarchical_cut(self.current_frame)
+                        if not self.model.is_hierarchical_locked:
+                            self.model.add_hierarchical_cut(self.current_frame)
 
                     elif e.key in (pygame.K_DELETE, pygame.K_BACKSPACE):
                         if self.selected_clip is not None:
@@ -419,8 +666,8 @@ class VideoLabelerApp:
                     elif e.key == pygame.K_SPACE:
                         self.playing = not self.playing
 
-            # Renderização
-            self.viewport_mgr.render(self.screen, self.engine, self.current_frame, self.is_loading_files)
+            # Renderização da Interface
+            self.viewport_mgr.render(self.screen, self.engine, self.current_frame, self.is_loading_files or self.is_exporting)
             self.draw_controls()
 
             if self.model.mode == AnnotationModel.MODE_CATEGORICAL:
@@ -429,9 +676,22 @@ class VideoLabelerApp:
             self.timeline.draw(self.screen, self.engine, self.model, self.current_frame, self.selected_clip, self.zoom_level)
             self.menu_bar.draw(self.screen, self.model.mode)
 
+            # Overlay de progresso para Exportação / Carregamento
+            if self.is_exporting or self.is_loading_files:
+                overlay = pygame.Surface((self.screen_w, self.screen_h), pygame.SRCALPHA)
+                overlay.fill((0, 0, 0, 180))
+                self.screen.blit(overlay, (0, 0))
+                txt_str = self.export_progress_text if self.is_exporting else "Aguardando seleção de arquivo..."
+                txt = self.font.render(txt_str, True, (255, 255, 255))
+                self.screen.blit(txt, txt.get_rect(center=(self.screen_w // 2, self.screen_h // 2)))
+
             if self.active_modal:
                 self.active_modal.draw()
 
             pygame.display.flip()
 
         pygame.quit()
+
+if __name__ == "__main__":
+    app = VideoLabelerApp()
+    app.run()
